@@ -1,7 +1,8 @@
 """
-MCP SSE Bridge on Fly.io
-Proxies MCP SSE/message to Oracle VM and Kimi VM
-Claude Web connects here -> Fly forwards to VMs
+MCP Streamable HTTP Bridge on Fly.io
+Protocol: 2025-03-26 (Streamable HTTP)
+Endpoint: /mcp (POST + GET)
+Proxies to Oracle VM, Kimi VM, Windows PC
 """
 import os
 import json
@@ -21,7 +22,6 @@ KIMI_VM = os.getenv("KIMI_VM_URL", "https://kimi-vm.34-72-175-66.sslip.io")
 KIMI_MCP_PATH = "/mcp/5d39aa90c50dfeda2f875f38bff906c1"
 KIMI_API_KEY = os.getenv("KIMI_MCP_KEY", "KimiVM_Secure_Key_2026")
 WINDOWS_TASK_URL = os.getenv("WINDOWS_TASK_URL", "https://92-5-72-169.sslip.io")
-API_KEY = os.getenv("MCP_API_KEY", "fly-mcp-bridge-2026")
 
 sessions = {}
 
@@ -55,21 +55,18 @@ WINDOWS_TOOLS = [
 ALL_TOOLS = ORACLE_TOOLS + KIMI_TOOLS + WINDOWS_TOOLS
 
 
-def proxy_to_vm(vm_url, tool_name, args):
+def proxy_to_vm(tool_name, args):
     if tool_name.startswith("oracle_"):
         backend_tool = tool_name[7:]
-        url = ORACLE_VM
-        endpoint = f"{url}/message?sessionId=bridge"
+        endpoint = f"{ORACLE_VM}/message?sessionId=bridge"
         headers = {"Content-Type": "application/json"}
     elif tool_name.startswith("kimi_"):
         backend_tool = tool_name[5:]
-        url = KIMI_VM
-        endpoint = f"{url}{KIMI_MCP_PATH}"
+        endpoint = f"{KIMI_VM}{KIMI_MCP_PATH}"
         headers = {"Content-Type": "application/json", "X-API-Key": KIMI_API_KEY}
     elif tool_name.startswith("windows_"):
         backend_tool = tool_name
-        url = ORACLE_VM
-        endpoint = f"{url}/message?sessionId=bridge"
+        endpoint = f"{ORACLE_VM}/message?sessionId=bridge"
         headers = {"Content-Type": "application/json"}
     else:
         return [{"type": "text", "text": f"Unknown tool prefix: {tool_name}"}]
@@ -87,42 +84,146 @@ def proxy_to_vm(vm_url, tool_name, args):
             result = data.get("result", {})
             return result.get("content", [{"type": "text", "text": json.dumps(result)}])
         elif resp.status_code == 202:
-            data = resp.json()
-            return [{"type": "text", "text": json.dumps(data)}]
+            return [{"type": "text", "text": "Accepted"}]
         else:
             return [{"type": "text", "text": f"Backend error: {resp.status_code} {resp.text[:500]}"}]
     except Exception as e:
-        return [{"type": "text", "text": f"Connection error to {url}: {str(e)[:300]}"}]
+        return [{"type": "text", "text": f"Connection error: {str(e)[:300]}"}]
 
 
-def handle_jsonrpc(body):
+def handle_jsonrpc(body, session_id=None):
     method = body.get("method", "")
     rid = body.get("id")
     params = body.get("params", {})
+    new_session = None
 
     if method == "initialize":
-        return {"jsonrpc": "2.0", "id": rid, "result": {
-            "protocolVersion": "2024-11-05",
-            "serverInfo": {"name": "fly-mcp-bridge", "version": "1.0.0"},
-            "capabilities": {"tools": {}},
-        }}
+        new_session = str(uuid.uuid4())
+        sessions[new_session] = {"created": time.time()}
+        return {
+            "jsonrpc": "2.0", "id": rid,
+            "result": {
+                "protocolVersion": "2025-03-26",
+                "serverInfo": {"name": "fly-mcp-bridge", "version": "2.0.0"},
+                "capabilities": {"tools": {}},
+            }
+        }, new_session
+
     elif method == "notifications/initialized":
-        return None
+        return None, None
+
     elif method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": ALL_TOOLS}}
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": ALL_TOOLS}}, None
+
     elif method == "tools/call":
         name = params.get("name", "")
         args = params.get("arguments", {})
-        content = proxy_to_vm(None, name, args)
-        return {"jsonrpc": "2.0", "id": rid, "result": {"content": content}}
-    elif method == "ping":
-        return {"jsonrpc": "2.0", "id": rid, "result": {}}
-    else:
-        return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Unknown method: {method}"}}
+        content = proxy_to_vm(name, args)
+        return {"jsonrpc": "2.0", "id": rid, "result": {"content": content}}, None
 
+    elif method == "ping":
+        return {"jsonrpc": "2.0", "id": rid, "result": {}}, None
+
+    else:
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Unknown: {method}"}}, None
+
+
+# ============ STREAMABLE HTTP: /mcp ============
+
+@app.route("/mcp", methods=["POST", "GET", "DELETE", "OPTIONS"])
+def mcp_endpoint():
+    if request.method == "OPTIONS":
+        resp = Response("", status=204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept, Mcp-Session-Id"
+        return resp
+
+    session_id = request.headers.get("Mcp-Session-Id")
+
+    # DELETE - terminate session
+    if request.method == "DELETE":
+        if session_id and session_id in sessions:
+            del sessions[session_id]
+            return Response("", status=200)
+        return Response("", status=404)
+
+    # GET - SSE stream for server-to-client notifications
+    if request.method == "GET":
+        accept = request.headers.get("Accept", "")
+        if "text/event-stream" not in accept:
+            return Response("", status=405)
+
+        def event_stream():
+            while True:
+                time.sleep(30)
+                yield ": ping\n\n"
+
+        resp = Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["Connection"] = "keep-alive"
+        resp.headers["X-Accel-Buffering"] = "no"
+        if session_id:
+            resp.headers["Mcp-Session-Id"] = session_id
+        return resp
+
+    # POST - JSON-RPC messages
+    body = request.json
+    if body is None:
+        return jsonify({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}}), 400
+
+    # Handle batch
+    if isinstance(body, list):
+        has_requests = any("id" in msg and "method" in msg for msg in body)
+        if not has_requests:
+            for msg in body:
+                handle_jsonrpc(msg, session_id)
+            return Response("", status=202)
+
+        responses = []
+        new_session = None
+        for msg in body:
+            result, ns = handle_jsonrpc(msg, session_id)
+            if ns:
+                new_session = ns
+            if result is not None:
+                responses.append(result)
+
+        if not responses:
+            resp = Response("", status=202)
+        elif len(responses) == 1:
+            resp = jsonify(responses[0])
+        else:
+            resp = jsonify(responses)
+        if new_session:
+            resp.headers["Mcp-Session-Id"] = new_session
+        return resp
+
+    # Single message
+    is_response = "result" in body or "error" in body
+    is_notification = "method" in body and "id" not in body
+
+    if is_response or is_notification:
+        handle_jsonrpc(body, session_id)
+        return Response("", status=202)
+
+    result, new_session = handle_jsonrpc(body, session_id)
+    if result is None:
+        resp = Response("", status=202)
+    else:
+        resp = jsonify(result)
+
+    if new_session:
+        resp.headers["Mcp-Session-Id"] = new_session
+    elif session_id:
+        resp.headers["Mcp-Session-Id"] = session_id
+    return resp
+
+
+# ============ LEGACY: /sse + /message (2024-11-05) ============
 
 @app.route("/sse")
-def sse():
+def sse_legacy():
     session_id = str(uuid.uuid4())
     sessions[session_id] = {"created": time.time()}
 
@@ -141,36 +242,35 @@ def sse():
 
 
 @app.route("/message", methods=["POST"])
-def message():
+def message_legacy():
     session_id = request.args.get("sessionId", "")
     if session_id not in sessions and session_id != "bridge":
         return jsonify({"error": "Invalid session"}), 400
 
     body = request.json
-    response = handle_jsonrpc(body)
-
+    response, _ = handle_jsonrpc(body, session_id)
     if response is None:
-        return jsonify({"ok": True}), 202
-
+        return Response("", status=202)
     return jsonify(response)
 
+
+# ============ HEALTH ============
 
 @app.route("/")
 def index():
     return jsonify({
         "name": "Fly MCP Bridge",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "protocol": "2025-03-26",
         "status": "ok",
         "tools": len(ALL_TOOLS),
         "backends": {"oracle_vm": ORACLE_VM, "kimi_vm": KIMI_VM},
-        "endpoints": {"sse": "/sse", "message": "/message", "health": "/health"}
+        "endpoints": {"mcp": "/mcp", "health": "/health", "sse_legacy": "/sse"}
     })
-
 
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "sessions": len(sessions)})
-
 
 def cleanup():
     while True:
