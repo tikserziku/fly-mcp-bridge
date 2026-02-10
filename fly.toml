@@ -1,0 +1,21 @@
+app = "mcp-bridge-sergej"
+primary_region = "ams"
+
+[build]
+
+[env]
+  ORACLE_VM_URL = "https://mcp.92-5-72-169.sslip.io"
+  KIMI_VM_URL = "https://kimi-vm.34-72-175-66.sslip.io"
+  KIMI_MCP_KEY = "KimiVM_Secure_Key_2026"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
