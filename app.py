@@ -1,7 +1,7 @@
 """
 MCP Streamable HTTP Bridge on Fly.io
 Protocol: 2025-03-26 (Streamable HTTP)
-Endpoint: /mcp (POST + GET)
+Endpoint: /mcp/<secret> (POST + GET)
 Proxies to Oracle VM, Kimi VM, Windows PC
 """
 import os
@@ -22,6 +22,9 @@ KIMI_VM = os.getenv("KIMI_VM_URL", "https://kimi-vm.34-72-175-66.sslip.io")
 KIMI_MCP_PATH = "/mcp/5d39aa90c50dfeda2f875f38bff906c1"
 KIMI_API_KEY = os.getenv("KIMI_MCP_KEY", "KimiVM_Secure_Key_2026")
 WINDOWS_TASK_URL = os.getenv("WINDOWS_TASK_URL", "https://92-5-72-169.sslip.io")
+
+# Secret path for MCP endpoint
+MCP_SECRET = os.getenv("MCP_SECRET", "b7f3a91d2e4c8056f1d9e3a7c4b2d8f6")
 
 sessions = {}
 
@@ -128,10 +131,16 @@ def handle_jsonrpc(body, session_id=None):
         return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Unknown: {method}"}}, None
 
 
-# ============ STREAMABLE HTTP: /mcp ============
+# ============ STREAMABLE HTTP: /mcp/<secret> and /mcp ============
 
-@app.route("/mcp", methods=["POST", "GET", "DELETE", "OPTIONS"])
-def mcp_endpoint():
+@app.route("/mcp/<secret>", methods=["POST", "GET", "DELETE", "OPTIONS"])
+@app.route("/mcp", methods=["POST", "GET", "DELETE", "OPTIONS"], defaults={"secret": None})
+def mcp_endpoint(secret):
+    # If secret path is used, verify it
+    if secret is not None and secret != MCP_SECRET:
+        return jsonify({"error": "Not found"}), 404
+
+    # CORS preflight
     if request.method == "OPTIONS":
         resp = Response("", status=204)
         resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -220,7 +229,7 @@ def mcp_endpoint():
     return resp
 
 
-# ============ LEGACY: /sse + /message (2024-11-05) ============
+# ============ LEGACY: /sse + /message ============
 
 @app.route("/sse")
 def sse_legacy():
@@ -264,8 +273,6 @@ def index():
         "protocol": "2025-03-26",
         "status": "ok",
         "tools": len(ALL_TOOLS),
-        "backends": {"oracle_vm": ORACLE_VM, "kimi_vm": KIMI_VM},
-        "endpoints": {"mcp": "/mcp", "health": "/health", "sse_legacy": "/sse"}
     })
 
 @app.route("/health")
